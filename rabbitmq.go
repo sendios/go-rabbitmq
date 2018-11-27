@@ -15,7 +15,10 @@ type RabbitMqClient struct {
 	conn *amqp.Connection
 }
 
+var declaredQueues map[string]int
+
 func NewRabbitMq(login string, pass string, host string, vhost string, port string) IRabbitMqClient {
+	declaredQueues = make(map[string]int)
 	connectionUrl := "amqp://" + login + ":" + pass + "@" + host + ":" + port + vhost
 	rabbitMqInstance := RabbitMqClient{}
 	rabbitMqInstance.connect(connectionUrl)
@@ -40,6 +43,61 @@ func (m *RabbitMqClient) Publish(queueName string, exchangeName string, body []b
 	}
 	ch, err := m.conn.Channel()
 	defer ch.Close()
+
+	queueDeclare(queueName, exchangeName, ch, durable)
+
+	err = ch.Publish(
+		"",
+		queueName,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "application/json",
+			Body:        body,
+		})
+
+	return err
+}
+
+func (m *RabbitMqClient) Consume(queueName string, exchangeName string, durable bool, handlerFunc func(amqp.Delivery)) error {
+
+	ch, err := m.conn.Channel()
+	failOnError(err, "Failed to open a channel")
+
+	queueDeclare(queueName, exchangeName, ch, durable)
+
+	msgs, err := ch.Consume(
+		queueName,
+		"",
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	failOnError(err, "Failed to register a consumer")
+
+	for d := range msgs {
+		handlerFunc(d)
+		//log.Printf("Received a message: %s", d.Body)
+	}
+
+	//go consumeLoop(msgs, handlerFunc)
+	return nil
+}
+
+func (m *RabbitMqClient) CloseConnection() {
+	if m.conn != nil {
+		m.conn.Close()
+	}
+}
+
+func queueDeclare(queueName string, exchangeName string, ch *amqp.Channel, durable bool) {
+
+	cacheKey := queueName + "_" + exchangeName
+	if declaredQueues[cacheKey] == 1 {
+		return
+	}
 
 	queue, err := ch.QueueDeclare(
 		queueName,
@@ -71,57 +129,10 @@ func (m *RabbitMqClient) Publish(queueName string, exchangeName string, body []b
 	)
 	failOnError(err, "Queue Bind: %s")
 
-	err = ch.Publish(
-		"",
-		queue.Name,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
-		})
+	declaredQueues[cacheKey] = 1
 
-	return err
-}
+	return
 
-func (m *RabbitMqClient) Consume(queueName string, exchangeName string, durable bool, handlerFunc func(amqp.Delivery)) error {
-	ch, err := m.conn.Channel()
-	failOnError(err, "Failed to open a channel")
-
-	queue, err := ch.QueueDeclare(
-		queueName,
-		durable,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Failed to register an queue")
-
-	msgs, err := ch.Consume(
-		queue.Name,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Failed to register a consumer")
-
-	for d := range msgs {
-		handlerFunc(d)
-		//log.Printf("Received a message: %s", d.Body)
-	}
-
-	//go consumeLoop(msgs, handlerFunc)
-	return nil
-}
-
-func (m *RabbitMqClient) CloseConnection() {
-	if m.conn != nil {
-		m.conn.Close()
-	}
 }
 
 func consumeLoop(deliveries <-chan amqp.Delivery, handlerFunc func(d amqp.Delivery)) {
