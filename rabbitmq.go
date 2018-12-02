@@ -82,6 +82,7 @@ func (c *RabbitMqClient) InitConsumer(queueName string, exchangeName string, dur
 
 	return cony.NewConsumer(
 		declearedQueue.queue,
+		cony.Qos(1000),
 		//cony.AutoAck(), // Auto sign the deliveries
 	)
 }
