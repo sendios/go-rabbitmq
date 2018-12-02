@@ -2,143 +2,93 @@ package rabbitmq
 
 import (
 	"fmt"
-	"github.com/streadway/amqp"
+	"github.com/assembla/cony"
 )
 
 type IRabbitMqClient interface {
-	Publish(queueName string, exchangeName string, body []byte, durable bool) error
-	Consume(queueName string, exchangeName string, durable bool, handlerFunc func(amqp.Delivery)) error
+	InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer
+	InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher
 	CloseConnection()
 }
 
 type RabbitMqClient struct {
-	conn *amqp.Connection
+	client *cony.Client
 }
 
-var declaredQueues map[string]int
+type DeclaredQueue struct {
+	declared bool
+	queue    *cony.Queue
+	exchange cony.Exchange
+}
 
-func NewRabbitMq(login string, pass string, host string, vhost string, port string) IRabbitMqClient {
-	declaredQueues = make(map[string]int)
+var declaredQueues map[string]DeclaredQueue
+
+func NewRabbitMq(login string, pass string, host string, vhost string, port string) (IRabbitMqClient, *cony.Client, error) {
+	declaredQueues = make(map[string]DeclaredQueue)
 	connectionUrl := "amqp://" + login + ":" + pass + "@" + host + ":" + port + vhost
+
 	rabbitMqInstance := RabbitMqClient{}
-	rabbitMqInstance.connect(connectionUrl)
-	return &rabbitMqInstance
-}
-
-func (m *RabbitMqClient) connect(connectionString string) {
-	if connectionString == "" {
-		panic("Cannot initialize connection to broker, connectionString not set. Have you initialized?")
-	}
-
-	var err error
-	m.conn, err = amqp.Dial(fmt.Sprintf("%s/", connectionString))
-	if err != nil {
-		panic("Failed to connect to AMQP compatible broker at: " + connectionString)
-	}
-}
-
-func (m *RabbitMqClient) Publish(queueName string, exchangeName string, body []byte, durable bool) error {
-	if m.conn == nil {
-		panic("Tried to send message before connection was initialized. Don't do that.")
-	}
-	ch, err := m.conn.Channel()
-	defer ch.Close()
-
-	queueDeclare(queueName, exchangeName, ch, durable)
-
-	err = ch.Publish(
-		"",
-		queueName,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
-		})
-
-	return err
-}
-
-func (m *RabbitMqClient) Consume(queueName string, exchangeName string, durable bool, handlerFunc func(amqp.Delivery)) error {
-
-	ch, err := m.conn.Channel()
-	failOnError(err, "Failed to open a channel")
-
-	queueDeclare(queueName, exchangeName, ch, durable)
-
-	msgs, err := ch.Consume(
-		queueName,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
+	rabbitMqInstance.client = cony.NewClient(
+		cony.URL(connectionUrl),
+		cony.Backoff(cony.DefaultBackoff),
 	)
-	failOnError(err, "Failed to register a consumer")
 
-	for d := range msgs {
-		handlerFunc(d)
-		//log.Printf("Received a message: %s", d.Body)
-	}
-
-	//go consumeLoop(msgs, handlerFunc)
-	return nil
+	return &rabbitMqInstance, rabbitMqInstance.client, nil
 }
 
-func (m *RabbitMqClient) CloseConnection() {
-	if m.conn != nil {
-		m.conn.Close()
-	}
+func (c *RabbitMqClient) CloseConnection() {
+	c.client.Close()
 }
 
-func queueDeclare(queueName string, exchangeName string, ch *amqp.Channel, durable bool) {
+func (c *RabbitMqClient) queueDeclare(queueName string, exchangeName string, durable bool) DeclaredQueue {
 
 	cacheKey := queueName + "_" + exchangeName
-	if declaredQueues[cacheKey] == 1 {
-		return
+	declaredQueue := declaredQueues[cacheKey]
+	if declaredQueue.declared {
+		return declaredQueue
 	}
 
-	queue, err := ch.QueueDeclare(
-		queueName,
-		durable,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Failed to register an Queue")
+	que := &cony.Queue{
+		Name:       queueName,
+		Durable:    durable,
+		AutoDelete: false,
+	}
+	exc := cony.Exchange{
+		Name:       exchangeName,
+		Kind:       "direct",
+		Durable:    durable,
+		AutoDelete: false,
+	}
+	bnd := cony.Binding{
+		Queue:    que,
+		Exchange: exc,
+		Key:      exchangeName + "_" + queueName,
+	}
 
-	err = ch.ExchangeDeclare(
-		exchangeName,
-		"direct",
-		durable,
-		false,
-		false,
-		false,
-		nil,
-	)
-	failOnError(err, "Failed to register an Exchange")
+	c.client.Declare([]cony.Declaration{
+		cony.DeclareQueue(que),
+		cony.DeclareExchange(exc),
+		cony.DeclareBinding(bnd),
+	})
 
-	err = ch.QueueBind(
-		queue.Name,
-		exchangeName,
-		exchangeName,
-		false,
-		nil,
-	)
-	failOnError(err, "Queue Bind: %s")
+	declaredQueues[cacheKey] = DeclaredQueue{true, que, exc}
 
-	declaredQueues[cacheKey] = 1
-
-	return
-
+	return declaredQueues[cacheKey]
 }
 
-func consumeLoop(deliveries <-chan amqp.Delivery, handlerFunc func(d amqp.Delivery)) {
-	for d := range deliveries {
-		handlerFunc(d)
-	}
+func (c *RabbitMqClient) InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer {
+
+	declearedQueue := c.queueDeclare(queueName, exchangeName, durable)
+
+	return cony.NewConsumer(
+		declearedQueue.queue,
+		//cony.AutoAck(), // Auto sign the deliveries
+	)
+}
+
+func (c *RabbitMqClient) InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher {
+	c.queueDeclare(queueName, exchangeName, durable)
+	return cony.NewPublisher(exchangeName, exchangeName+"_"+queueName)
 }
 
 func failOnError(err error, msg string) {
