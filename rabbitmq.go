@@ -1,13 +1,12 @@
 package rabbitmq
 
 import (
-	"fmt"
 	"github.com/assembla/cony"
+	"github.com/streadway/amqp"
 )
 
 type IRabbitMqClient interface {
-	InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer
-	InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher
+	Publish(data []byte, queueName string, exchangeName string, durable bool) error
 	CloseConnection()
 }
 
@@ -23,28 +22,27 @@ type DeclaredQueue struct {
 
 var declaredQueues map[string]DeclaredQueue
 
-func NewRabbitMq(login string, pass string, host string, vhost string, port string) (IRabbitMqClient, *cony.Client, error) {
+func NewRabbitMq(connectionString string) IRabbitMqClient {
 	declaredQueues = make(map[string]DeclaredQueue)
-	connectionUrl := "amqp://" + login + ":" + pass + "@" + host + ":" + port + vhost
 
 	rabbitMqInstance := RabbitMqClient{}
 	rabbitMqInstance.client = cony.NewClient(
-		cony.URL(connectionUrl),
+		cony.URL(connectionString),
 		cony.Backoff(cony.DefaultBackoff),
 	)
 
-	return &rabbitMqInstance, rabbitMqInstance.client, nil
+	return &rabbitMqInstance
 }
 
 func (c *RabbitMqClient) CloseConnection() {
 	c.client.Close()
 }
 
-func (c *RabbitMqClient) queueDeclare(queueName string, exchangeName string, durable bool) DeclaredQueue {
+func (c *RabbitMqClient) queueDeclare(queueName string, exchangeName string, durable bool, force bool) DeclaredQueue {
 
-	cacheKey := queueName + "_" + exchangeName
-	declaredQueue := declaredQueues[cacheKey]
-	if declaredQueue.declared {
+	bindingKey := exchangeName + "_" + queueName
+	declaredQueue := declaredQueues[bindingKey]
+	if declaredQueue.declared && force == false {
 		return declaredQueue
 	}
 
@@ -62,7 +60,7 @@ func (c *RabbitMqClient) queueDeclare(queueName string, exchangeName string, dur
 	bnd := cony.Binding{
 		Queue:    que,
 		Exchange: exc,
-		Key:      exchangeName + "_" + queueName,
+		Key:      bindingKey,
 	}
 
 	c.client.Declare([]cony.Declaration{
@@ -71,30 +69,31 @@ func (c *RabbitMqClient) queueDeclare(queueName string, exchangeName string, dur
 		cony.DeclareBinding(bnd),
 	})
 
-	declaredQueues[cacheKey] = DeclaredQueue{true, que, exc}
+	declaredQueues[bindingKey] = DeclaredQueue{true, que, exc}
 
-	return declaredQueues[cacheKey]
+	return declaredQueues[bindingKey]
+}
+
+func (c *RabbitMqClient) Publish(data []byte, queueName string, exchangeName string, durable bool) error {
+	c.queueDeclare(queueName, exchangeName, durable, false)
+	producer := cony.NewPublisher(exchangeName, exchangeName+"_"+queueName)
+
+	var err error
+	if err := producer.Publish(amqp.Publishing{Body: data}); err != nil {
+		c.queueDeclare(queueName, exchangeName, durable, true)
+		err = producer.Publish(amqp.Publishing{Body: data})
+	}
+	return err
+
 }
 
 func (c *RabbitMqClient) InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer {
 
-	declearedQueue := c.queueDeclare(queueName, exchangeName, durable)
+	declearedQueue := c.queueDeclare(queueName, exchangeName, durable, true)
 
 	return cony.NewConsumer(
 		declearedQueue.queue,
 		cony.Qos(30),
 		//cony.AutoAck(), // Auto sign the deliveries
 	)
-}
-
-func (c *RabbitMqClient) InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher {
-	c.queueDeclare(queueName, exchangeName, durable)
-	return cony.NewPublisher(exchangeName, exchangeName+"_"+queueName)
-}
-
-func failOnError(err error, msg string) {
-	if err != nil {
-		fmt.Printf("%s: %s", msg, err)
-		panic(fmt.Sprintf("%s: %s", msg, err))
-	}
 }

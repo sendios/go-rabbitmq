@@ -1,5 +1,0 @@
-package: .
-import:
-- package: github.com/streadway/amqp
-- package: github.com/assembla/cony
-  version: ~0.3.2
