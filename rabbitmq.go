@@ -7,6 +7,8 @@ import (
 
 type IRabbitMqClient interface {
 	Publish(data []byte, queueName string, exchangeName string, durable bool) error
+	InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer
+	InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher
 	CloseConnection()
 }
 
@@ -22,7 +24,7 @@ type DeclaredQueue struct {
 
 var declaredQueues map[string]DeclaredQueue
 
-func NewRabbitMq(connectionString string) IRabbitMqClient {
+func NewRabbitMq(connectionString string) (IRabbitMqClient, *cony.Client) {
 	declaredQueues = make(map[string]DeclaredQueue)
 
 	rabbitMqInstance := RabbitMqClient{}
@@ -31,7 +33,7 @@ func NewRabbitMq(connectionString string) IRabbitMqClient {
 		cony.Backoff(cony.DefaultBackoff),
 	)
 
-	return &rabbitMqInstance
+	return &rabbitMqInstance, rabbitMqInstance.client
 }
 
 func (c *RabbitMqClient) CloseConnection() {
@@ -79,21 +81,25 @@ func (c *RabbitMqClient) Publish(data []byte, queueName string, exchangeName str
 	producer := cony.NewPublisher(exchangeName, exchangeName+"_"+queueName)
 
 	var err error
-	if err := producer.Publish(amqp.Publishing{Body: data}); err != nil {
+	if err = producer.Publish(amqp.Publishing{Body: data}); err != nil {
+		// try redeclare queue and exchange and publish
 		c.queueDeclare(queueName, exchangeName, durable, true)
 		err = producer.Publish(amqp.Publishing{Body: data})
 	}
 	return err
-
 }
 
 func (c *RabbitMqClient) InitConsumer(queueName string, exchangeName string, durable bool) *cony.Consumer {
 
 	declearedQueue := c.queueDeclare(queueName, exchangeName, durable, true)
-
 	return cony.NewConsumer(
 		declearedQueue.queue,
 		cony.Qos(30),
 		//cony.AutoAck(), // Auto sign the deliveries
 	)
+}
+
+func (c *RabbitMqClient) InitProducer(queueName string, exchangeName string, durable bool) *cony.Publisher {
+	c.queueDeclare(queueName, exchangeName, durable, true)
+	return cony.NewPublisher(exchangeName, exchangeName+"_"+queueName)
 }
