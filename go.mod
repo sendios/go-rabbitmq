@@ -1,4 +1,4 @@
-module github.com/mailfire/go-rabbitmq
+module github.com/mailfire/go-rabbitmq-mailfier
 
 require (
 	github.com/assembla/cony v0.3.2
