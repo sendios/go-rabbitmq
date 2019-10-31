@@ -76,12 +76,20 @@ func OpenConnection(connectionString string) (*Connection, error) {
 	return connection, nil
 }
 
-func (c *Connection) OpenChannel() (IChannel, error) {
+/**
+With a prefetch count greater than zero, the server will deliver that many
+messages to consumers before acknowledgments are received.  The server ignores
+this option when consumers are started with noAck because no acknowledgments
+are expected or sent.
+*/
+func (c *Connection) OpenChannel(prefetchCount int) (IChannel, error) {
 
 	ch, err := c.Connection.Channel()
 	if err != nil {
 		return nil, err
 	}
+
+	_ = ch.Qos(prefetchCount, 0, false)
 
 	channel := &Channel{
 		Channel: ch,
